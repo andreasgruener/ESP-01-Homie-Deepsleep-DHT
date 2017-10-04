@@ -1,0 +1,7 @@
+.DS_Store
+.pioenvs
+.piolibdeps
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+src/.vscode/arduino.json
+src/.vscode/c_cpp_properties.json
