@@ -4,8 +4,8 @@
 
 #define DHTPIN 2 // D5
 #define DHTTYPE DHT22   // Es handelt sich um den DHT22 Sensor
-#define FW_NAME "esp-01-deepsleep-dht11"
-#define FW_VERSION "1.6"
+#define FW_NAME "esp-01-deepsleep-dht22"
+#define FW_VERSION "1.7"
 
 
 /* Magic sequence for Autodetectable Binary Upload */
@@ -13,6 +13,10 @@ const char *__FLAGGED_FW_NAME = "\xbf\x84\xe4\x13\x54" FW_NAME "\x93\x44\x6b\xa7
 const char *__FLAGGED_FW_VERSION = "\x6a\x3f\x3e\x0e\xe1" FW_VERSION "\xb0\x30\x48\xd4\x1a";
 /* End of magic sequence for Autodetectable Binary Upload */
 
+// config file to store config for reset / reboot
+const char* UH27_CONFIG_FILENAME = "uh27/config.json";
+const unsigned int JSON_CONFIG_MAX_BUFFER_SIZE = 1024;
+const char* CONFIG_VERSION = "1.0";
 
 // 5ccf7fa47b9e HomeTemperature3 # GRETA
 // mosquitto_pub -h 10.0.2.2 -t "homie/5ccf7fa47b9e/light/on/set" -m "true"
@@ -36,7 +40,10 @@ double battery_voltage;
 
 //deepsleep (in seconds)
 //int deepsleeptime = 12;
-int deepsleeptime = 600;
+/* DEEPSLEEP */
+const int DEFAULT_DEEP_SLEEP_TIME = 5;
+int deepsleeptime = DEFAULT_DEEP_SLEEP_TIME;
+boolean deepSleepEnabled = true;
 
 
 HomieNode lightNode("light", "switch");
@@ -45,8 +52,7 @@ HomieNode humidityNode("humidity", "humidity");
 HomieNode batteryNode("battery", "battery");
 HomieNode deepsleepNode("deepsleep", "deepsleep");
 // Temperature
-DHT dht(DHTPIN, DHTTYPE); //Der Sensor wird ab jetzt mit „DHT“ angesprochen
-
+DHT dht(DHTPIN, DHTTYPE); //Der Sen 
 // if you nee getVCC() turn this on
 ADC_MODE(ADC_VCC);
 
@@ -63,7 +69,10 @@ void setupHandler() {
 
   deepsleepNode.advertise("sleeptime").settable(deepsleepHandler);
   deepsleepNode.setProperty("sleeptime").send(String(deepsleeptime));
-  
+
+  deepsleepNode.advertise("enabled").settable(deepsleepEnabledHandler);
+  deepsleepNode.setProperty("enabled").send(String(deepSleepEnabled));
+
   temperatureNode.setProperty("unit").send("c");
   humidityNode.setProperty("unit").send("%");
   batteryNode.setProperty("unit").send("V");
@@ -97,6 +106,24 @@ bool lightOnHandler(const HomieRange& range, const String& value) {
 }
 
 /*
+*
+*/
+bool deepsleepEnabledHandler(const HomieRange& range, const String& value) { 
+  
+  Homie.getLogger() << "MQTT Input :: Got Deepsleep Enabled " << value << endl;;
+  if (value != "true" && value != "false") return false;
+
+  bool enabled = (value == "true");
+  deepSleepEnabled  = enabled;
+  deepsleepNode.setProperty("enabled").send(value);
+
+  Homie.getLogger() << "   Deepsleep Enabled value  " << deepSleepEnabled << endl;
+  saveConfig();
+
+  return true;
+}
+
+/*
 NOt yet working - keeps forgetting...
 */
 bool deepsleepHandler(const HomieRange& range, const String& value) { 
@@ -106,8 +133,9 @@ bool deepsleepHandler(const HomieRange& range, const String& value) {
   deepsleeptime  = delay;
   deepsleepNode.setProperty("sleeptime").send(value);
 
-  Homie.getLogger() << "deepsleep value  " << delay << endl;
-
+  Homie.getLogger() << "Deepsleep Delay Value  " << delay << endl;
+  saveConfig();
+  
   return true;
 }
 
@@ -133,6 +161,9 @@ void setup() {
 
   Serial << endl << endl;
 
+  initFS();
+  readConfig();
+
   //pinMode(PIN_RELAY, OUTPUT);
   //digitalWrite(PIN_RELAY, LOW);
  
@@ -145,8 +176,10 @@ void setup() {
   Homie.setSetupFunction(setupHandler).setLoopFunction(loopHandler);
   
   Homie.onEvent(onHomieEvent);
-  
-
+  /*
+  Homie.reset();
+  Homie.setIdle(true);
+  */
   Homie.setup();
   dht.begin(); //DHT11 Sensor starten
   // sensors.begin(); //OneWire/Dallas
@@ -243,12 +276,12 @@ void checkDHT11() {
 
 void checkDHT11DeepSleep() {
   
-  if (  millis() - lastRetry >= 3000UL ) {
+  if (  millis() - lastRetry >= 3000UL && millis() - lastTemperatureSent >= temperature_interval * 1000UL) {
 
     float temperature = 0;
     float humidity = 0;
     float pressure = 0;
-    lastTemperatureSent =  millis();
+    // lastTemperatureSent =  millis();
 
     // successful the lasttime, new game
     if ( retries == maxRetries ) {
@@ -257,10 +290,19 @@ void checkDHT11DeepSleep() {
       retries++;
       deepsleepNode.setProperty("seconds").send(String(deepsleeptime));
       // uncomment ESP-01
-      Homie.prepareToSleep();
+      if ( deepSleepEnabled ) {
+        Homie.getLogger() << "Deepsleep is enabled" << endl;
+        Homie.prepareToSleep();
+      }
+      else {
+        Homie.getLogger() << "Deepsleep is NOT enabled" << endl;
+        retries = 0;
+        lastRetry = millis() + temperature_interval * 1000UL;  // wait for delay
+      }
       return;
     } else if ( retries > maxRetries ) {
-      // ignore
+      Homie.getLogger() << "Wait 15 seconds for next retry" << endl;
+      lastRetry = millis() + 15000UL;  // wait 15 seconds
       return;
     }
 
@@ -291,7 +333,15 @@ void checkDHT11DeepSleep() {
       batteryNode.setProperty("voltage").send(String(getBatteryVoltage()));
       Homie.getLogger() << "Prepare Deepsleep for " << deepsleeptime << " seconds " << endl;
       // uncomment ESP-01
-      Homie.prepareToSleep();
+      if ( deepSleepEnabled ) {
+        Homie.getLogger() << "Deepsleep is enabled" << endl;
+        Homie.prepareToSleep();
+      }
+      else {
+        Homie.getLogger() << "Deepsleep is NOT enabled" << endl;
+        retries = 0;
+        lastRetry = millis() + temperature_interval * 1000UL;  // wait for delay
+      }
     }
   }
 }
@@ -313,5 +363,92 @@ void loopHandler() {
 }
 
 void loop() {
+
   Homie.loop();
 }
+
+
+
+
+
+/**************************************************************************/
+/* FILESYSTEM */
+/**************************************************************************/
+
+
+/**
+ * 
+ */
+void initFS() {
+  bool result = SPIFFS.begin();
+  if ( !result ) {
+      //Serial.println("COULD NO Mount Filesystem");
+  }
+  else {
+      //Serial.println("Mounted successfully.");
+  }
+}
+
+
+/**
+* 
+*/
+void saveConfig() {
+  // open the file in write mode
+  File f = SPIFFS.open(UH27_CONFIG_FILENAME, "w");
+  if (!f) {
+    //Serial.println("file creation failed");
+  }
+  StaticJsonBuffer<200> jsonBuffer;
+  JsonObject& root = jsonBuffer.createObject();
+  root["version"] = CONFIG_VERSION;
+  root["sleeptime"] = deepsleeptime;
+  root["deepSleepEnabled"] = deepSleepEnabled;
+  String output;
+  root.printTo(output);
+  // now write two lines in key/value style with  end-of-line characters
+  // char json[] =  "{\"sleeptime\":\"33\",\"version\":\"1.0\"}";
+  f.println(output);
+  f.close();
+  Serial.println("Updated UH27 Config.");
+}
+
+/**
+* 
+*/
+bool readConfig() {
+  File configFile = SPIFFS.open(UH27_CONFIG_FILENAME, "r");
+
+  if (!configFile) {
+    //Serial.println("✖ Cannot open config file");
+    return false;
+  }
+
+  size_t configSize = configFile.size();
+  
+  std::unique_ptr<char[]> buf(new char[configSize]);
+  configFile.readBytes(buf.get(), configSize);
+  
+  StaticJsonBuffer<JSON_CONFIG_MAX_BUFFER_SIZE> jsonBuffer;
+  JsonObject& parsed_json = jsonBuffer.parseObject(buf.get());
+  if (!parsed_json.success()) {
+    //Serial.println("✖ Invalid or too big config file");
+    return false;
+  }
+
+  int delay = parsed_json["sleeptime"]; 
+  deepsleeptime = delay;
+  // Serial.print("sleeptime : "); 
+  // Serial.println(delay);
+
+
+  int deepSleepOn = parsed_json["deepSleepEnabled"]; 
+  deepSleepEnabled = deepSleepOn;
+  // Serial.print("Deepsleep On : "); 
+  // Serial.println(deepSleepEnabled);
+
+  const char* version = parsed_json["version"]; 
+  // Serial.print("Version : ");
+  Serial.println("Read UH27 Config");
+}
+
